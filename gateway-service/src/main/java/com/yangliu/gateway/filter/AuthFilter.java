@@ -1,10 +1,12 @@
 package com.yangliu.gateway.filter;
 
 import com.yangliu.gateway.feignClient.Oauth2ServiceClient;
+import lombok.SneakyThrows;
 import org.aspectj.weaver.ast.Var;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.core.Ordered;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.reactive.ServerHttpRequest;
@@ -16,6 +18,7 @@ import reactor.core.publisher.Mono;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentSkipListSet;
 
 /**
@@ -26,8 +29,13 @@ import java.util.concurrent.ConcurrentSkipListSet;
  **/
 @Component
 public class AuthFilter implements Ordered, GlobalFilter {
-
+    /**
+     * 通过Autowired我们引入feignclient会发生死锁，springcloud gateway基于netty的，是webFlux的响应式的编程。
+     * 引入feignclient，在代码设计层面Loaded RoutePredicateFactory会造成死锁，导致无法启动
+     * 需要添加@Lazy礼让我们的springcloud gateway的webflux相关的加载
+     */
     @Autowired
+    @Lazy
     private Oauth2ServiceClient oauth2ServiceClient;
 
     //存放不需要进行token校验的路径（正则表达式）
@@ -44,6 +52,7 @@ public class AuthFilter implements Ordered, GlobalFilter {
      * @param chain
      * @return
      */
+    @SneakyThrows
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         ServerHttpRequest request = exchange.getRequest();
@@ -54,7 +63,22 @@ public class AuthFilter implements Ordered, GlobalFilter {
             return chain.filter(exchange);
         }
         String token = request.getHeaders().getFirst("Authorization");
-        Map<String, Object> result = oauth2ServiceClient.checkToken(token);
+        /**
+         * 报错在block()/blockFirst()/blockLast() are blocking, which is not supported in thread reactor-http-nio-3
+         * reactor 响应式编程就是基于 reactor的；
+         * Map<String, Object> result = oauth2ServiceClient.checkToken(token)是命令式编程，会发生冲突
+         */
+        //Map<String, Object> result = oauth2ServiceClient.checkToken(token);//同步rest请求
+        //改为异步
+        /**
+         * 报错 Feign.codec.DecodeException: No qualifying bean of type
+         * 'org.springframework.boot.autoconfigure.http.HttpMessageConverters' available:
+         * expected at least 1 bean which qualifies as autowire candidate.
+         * HttpMessageConverters 这个是我们http请求的msg转化器，openfeign和gateway的调用机制有冲突
+         */
+        CompletableFuture<Map> future = CompletableFuture.supplyAsync(() -> oauth2ServiceClient.checkToken(token));
+        Map<String,Object> result = future.get();
+
         boolean active = (boolean) result.get("Active");
         if (!active){
             //验证未通过

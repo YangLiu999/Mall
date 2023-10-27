@@ -11,7 +11,6 @@ import java.util.Map;
  * @author YL
  * @date 2023/10/11
  **/
-@Component
 @FeignClient("oauth2-service")
 public interface Oauth2ServiceClient {
     /**
